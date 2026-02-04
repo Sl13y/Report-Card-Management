@@ -1,8 +1,14 @@
+import { app } from './firebase';
+import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, query, where, getDocs, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, Home, Users, Calendar, FileText, BarChart3, Plus, Edit2, Trash2, Award, Download, Printer, User, Mail, Phone, Loader, X, Menu } from 'lucide-react';
+import AuthForm from './AuthForm';
+import { Search, Home, Users, Calendar, FileText, BarChart3, Plus, Edit2, Trash2, Award, Download, Printer, User, Mail, Phone, Loader, X, Menu, LogOut } from 'lucide-react';
 
 export default function StudentManagementSystem() {
+  const [user, setUser] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('home');
   const [searchQuery, setSearchQuery] = useState('');
   const [students, setStudents] = useState([]);
@@ -40,6 +46,132 @@ export default function StudentManagementSystem() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
 
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // Firestore collections
+  const studentsCollection = collection(db, 'students');
+  const attendanceCollection = collection(db, 'attendance');
+  const examsCollection = collection(db, 'exams');
+
+  // Check authentication state
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthLoading(false);
+      
+      // Only load app data if user is logged in
+      if (currentUser) {
+        loadInitialData(currentUser.uid);
+        setupRealtimeListeners(currentUser.uid);
+      } else {
+        setIsLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [auth]);
+
+  // Load initial data from Firestore
+  const loadInitialData = async (userId) => {
+    try {
+      setIsLoading(true);
+      
+      // Load students
+      const studentsQuery = query(studentsCollection, where('createdBy', '==', userId));
+      const studentsSnapshot = await getDocs(studentsQuery);
+      const studentsList = studentsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setStudents(studentsList);
+
+      // Load attendance
+      const attendanceQuery = query(attendanceCollection, where('createdBy', '==', userId));
+      const attendanceSnapshot = await getDocs(attendanceQuery);
+      const attendanceList = attendanceSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setAttendance(attendanceList);
+
+      // Load exams
+      const examsQuery = query(examsCollection, where('createdBy', '==', userId));
+      const examsSnapshot = await getDocs(examsQuery);
+      const examsList = examsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setExams(examsList);
+
+      setIsLoading(false);
+    } catch (error) {
+      console.error('Error loading data from Firestore:', error);
+      alert('Error loading data. Please refresh the page.');
+      setIsLoading(false);
+    }
+  };
+
+  // Set up real-time listeners when user is logged in
+  const setupRealtimeListeners = (userId) => {
+    // Students listener
+    const studentsQuery = query(studentsCollection, where('createdBy', '==', userId));
+    const unsubscribeStudents = onSnapshot(studentsQuery, (snapshot) => {
+      const studentsList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setStudents(studentsList);
+    }, (error) => {
+      console.error('Error in students listener:', error);
+    });
+
+    // Attendance listener
+    const attendanceQuery = query(attendanceCollection, where('createdBy', '==', userId));
+    const unsubscribeAttendance = onSnapshot(attendanceQuery, (snapshot) => {
+      const attendanceList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setAttendance(attendanceList);
+    }, (error) => {
+      console.error('Error in attendance listener:', error);
+    });
+
+    // Exams listener
+    const examsQuery = query(examsCollection, where('createdBy', '==', userId));
+    const unsubscribeExams = onSnapshot(examsQuery, (snapshot) => {
+      const examsList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setExams(examsList);
+    }, (error) => {
+      console.error('Error in exams listener:', error);
+    });
+
+    return () => {
+      unsubscribeStudents();
+      unsubscribeAttendance();
+      unsubscribeExams();
+    };
+  };
+
+  // Clean up listeners when component unmounts
+  useEffect(() => {
+    let cleanupListeners;
+    
+    if (user) {
+      cleanupListeners = setupRealtimeListeners(user.uid);
+    }
+    
+    return () => {
+      if (cleanupListeners) {
+        cleanupListeners();
+      }
+    };
+  }, [user]);
+
   // Check if mobile on mount and resize
   useEffect(() => {
     const checkMobile = () => {
@@ -52,21 +184,28 @@ export default function StudentManagementSystem() {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  // Simulate initial loading
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 1500);
-
-    return () => clearTimeout(timer);
-  }, []);
-
   // Close mobile menu when switching tabs
   useEffect(() => {
     if (isMobileMenuOpen) {
       setIsMobileMenuOpen(false);
     }
   }, [activeTab]);
+
+  // Handle logout
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      // Clear all local data on logout
+      setStudents([]);
+      setAttendance([]);
+      setExams([]);
+      setSearchQuery('');
+      setActiveTab('home');
+    } catch (error) {
+      console.error('Logout error:', error);
+      alert('Error logging out. Please try again.');
+    }
+  };
 
   // Get unique classes for filtering
   const uniqueClasses = [...new Set(students.map(student => student.class))];
@@ -78,36 +217,88 @@ export default function StudentManagementSystem() {
     student.email.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // Handle adding a new student
-  const handleAddStudent = () => {
+  // Handle adding a new student to Firestore
+  const handleAddStudent = async () => {
     if (formData.name && formData.class && formData.email && formData.phone) {
-      const newStudent = {
-        id: Date.now(),
-        ...formData
-      };
-      setStudents([...students, newStudent]);
-      setFormData({ name: '', class: '', email: '', phone: '' });
-      setShowAddModal(false);
+      try {
+        const newStudent = {
+          ...formData,
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        
+        await addDoc(studentsCollection, newStudent);
+        
+        setFormData({ name: '', class: '', email: '', phone: '' });
+        setShowAddModal(false);
+        alert('Student added successfully!');
+      } catch (error) {
+        console.error('Error adding student:', error);
+        alert('Error adding student. Please try again.');
+      }
+    } else {
+      alert('Please fill in all fields!');
     }
   };
 
-  // Handle editing a student
-  const handleEditStudent = () => {
-    if (formData.name && formData.class && formData.email && formData.phone) {
-      setStudents(students.map(student => 
-        student.id === editingStudent.id ? { ...student, ...formData } : student
-      ));
-      setFormData({ name: '', class: '', email: '', phone: '' });
-      setEditingStudent(null);
-      setShowEditModal(false);
+  // Handle editing a student in Firestore
+  const handleEditStudent = async () => {
+    if (formData.name && formData.class && formData.email && formData.phone && editingStudent) {
+      try {
+        const studentRef = doc(db, 'students', editingStudent.id);
+        await updateDoc(studentRef, {
+          ...formData,
+          updatedAt: serverTimestamp()
+        });
+        
+        setFormData({ name: '', class: '', email: '', phone: '' });
+        setEditingStudent(null);
+        setShowEditModal(false);
+        alert('Student updated successfully!');
+      } catch (error) {
+        console.error('Error updating student:', error);
+        alert('Error updating student. Please try again.');
+      }
+    } else {
+      alert('Please fill in all fields!');
     }
   };
 
-  // Handle deleting a student
-  const handleDeleteStudent = (id) => {
+  // Handle deleting a student from Firestore
+  const handleDeleteStudent = async (id) => {
     if (window.confirm('Are you sure you want to delete this student?')) {
-      setStudents(students.filter(student => student.id !== id));
-      setExams(exams.filter(exam => exam.studentId !== id));
+      try {
+        const studentRef = doc(db, 'students', id);
+        await deleteDoc(studentRef);
+        
+        // Also delete associated exams
+        const examsQuery = query(examsCollection, 
+          where('studentId', '==', id),
+          where('createdBy', '==', user.uid)
+        );
+        const examsSnapshot = await getDocs(examsQuery);
+        const deletePromises = examsSnapshot.docs.map(examDoc => 
+          deleteDoc(doc(db, 'exams', examDoc.id))
+        );
+        await Promise.all(deletePromises);
+        
+        // Also delete associated attendance records
+        const attendanceQuery = query(attendanceCollection, 
+          where('studentId', '==', id),
+          where('createdBy', '==', user.uid)
+        );
+        const attendanceSnapshot = await getDocs(attendanceQuery);
+        const deleteAttendancePromises = attendanceSnapshot.docs.map(attendanceDoc => 
+          deleteDoc(doc(db, 'attendance', attendanceDoc.id))
+        );
+        await Promise.all(deleteAttendancePromises);
+        
+        alert('Student and all associated records deleted successfully!');
+      } catch (error) {
+        console.error('Error deleting student:', error);
+        alert('Error deleting student. Please try again.');
+      }
     }
   };
 
@@ -144,29 +335,49 @@ export default function StudentManagementSystem() {
     });
   };
 
-  // Mark attendance for a student
-  const markAttendance = (studentId, status) => {
-    const student = students.find(s => s.id === studentId);
-    const existingRecord = attendance.find(
-      a => a.studentId === studentId && a.date === todayDate
-    );
+  // Mark attendance for a student and save to Firestore
+  const markAttendance = async (studentId, status) => {
+    try {
+      const student = students.find(s => s.id === studentId);
+      if (!student) {
+        alert('Student not found!');
+        return;
+      }
 
-    if (existingRecord) {
-      setAttendance(attendance.map(a => 
-        a.studentId === studentId && a.date === todayDate
-          ? { ...a, status }
-          : a
-      ));
-    } else {
-      const newRecord = {
-        id: Date.now(),
-        studentId: student.id,
-        name: student.name,
-        class: student.class,
-        date: todayDate,
-        status
-      };
-      setAttendance([...attendance, newRecord]);
+      // Check for existing attendance record for today
+      const attendanceQuery = query(
+        attendanceCollection,
+        where('studentId', '==', studentId),
+        where('date', '==', todayDate),
+        where('createdBy', '==', user.uid)
+      );
+      
+      const querySnapshot = await getDocs(attendanceQuery);
+      
+      if (!querySnapshot.empty) {
+        // Update existing record
+        const existingDoc = querySnapshot.docs[0];
+        await updateDoc(doc(db, 'attendance', existingDoc.id), {
+          status,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        // Create new record
+        const newRecord = {
+          studentId: student.id,
+          name: student.name,
+          class: student.class,
+          date: todayDate,
+          status,
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        await addDoc(attendanceCollection, newRecord);
+      }
+    } catch (error) {
+      console.error('Error marking attendance:', error);
+      alert('Error marking attendance. Please try again.');
     }
   };
 
@@ -208,58 +419,73 @@ export default function StudentManagementSystem() {
     return 'F';
   };
 
-  // Handle recording an exam
-  const handleRecordExam = () => {
+  // Handle recording an exam to Firestore
+  const handleRecordExam = async () => {
     if (examFormData.studentId && examFormData.examName && examFormData.subject && examFormData.score && examFormData.maxScore) {
-      const studentId = parseInt(examFormData.studentId);
-      const student = students.find(s => s.id === studentId);
-      
-      if (!student) {
-        alert('Student not found!');
-        return;
+      try {
+        const studentId = examFormData.studentId;
+        const student = students.find(s => s.id === studentId);
+        
+        if (!student) {
+          alert('Student not found!');
+          return;
+        }
+        
+        const grade = calculateGrade(examFormData.score, examFormData.maxScore);
+        const percentage = examFormData.maxScore ? Math.round((parseFloat(examFormData.score) / parseFloat(examFormData.maxScore)) * 100) : 0;
+        
+        const newExam = {
+          studentId: studentId,
+          studentName: student.name,
+          examName: examFormData.examName,
+          subject: examFormData.subject,
+          date: examFormData.date,
+          score: parseFloat(examFormData.score),
+          maxScore: parseFloat(examFormData.maxScore),
+          grade,
+          notes: examFormData.notes,
+          percentage: percentage,
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        
+        await addDoc(examsCollection, newExam);
+        
+        setExamFormData({
+          studentId: '',
+          studentName: '',
+          examName: '',
+          subject: '',
+          date: '',
+          score: '',
+          maxScore: '',
+          grade: '',
+          notes: ''
+        });
+        setShowRecordExamModal(false);
+        
+        alert(`Exam result recorded successfully for ${student.name}!`);
+      } catch (error) {
+        console.error('Error recording exam:', error);
+        alert('Error recording exam result. Please try again.');
       }
-      
-      const grade = calculateGrade(examFormData.score, examFormData.maxScore);
-      const percentage = examFormData.maxScore ? Math.round((parseFloat(examFormData.score) / parseFloat(examFormData.maxScore)) * 100) : 0;
-      
-      const newExam = {
-        id: Date.now(),
-        studentId: studentId,
-        studentName: student.name,
-        examName: examFormData.examName,
-        subject: examFormData.subject,
-        date: examFormData.date,
-        score: parseFloat(examFormData.score),
-        maxScore: parseFloat(examFormData.maxScore),
-        grade,
-        notes: examFormData.notes,
-        percentage: percentage
-      };
-      
-      setExams([...exams, newExam]);
-      setExamFormData({
-        studentId: '',
-        studentName: '',
-        examName: '',
-        subject: '',
-        date: '',
-        score: '',
-        maxScore: '',
-        grade: '',
-        notes: ''
-      });
-      setShowRecordExamModal(false);
-      
-      alert(`Exam result recorded successfully for ${student.name}!`);
     } else {
       alert('Please fill in all required fields!');
     }
   };
 
-  // Handle deleting an exam
-  const handleDeleteExam = (id) => {
+  // Handle deleting an exam from Firestore
+  const handleDeleteExam = async (id) => {
     if (window.confirm('Are you sure you want to delete this exam result?')) {
-      setExams(exams.filter(exam => exam.id !== id));
+      try {
+        const examRef = doc(db, 'exams', id);
+        await deleteDoc(examRef);
+        alert('Exam result deleted successfully!');
+      } catch (error) {
+        console.error('Error deleting exam:', error);
+        alert('Error deleting exam result. Please try again.');
+      }
     }
   };
 
@@ -864,15 +1090,6 @@ export default function StudentManagementSystem() {
       return true;
     });
 
-    // Group exams by student
-    const examsByStudent = {};
-    filteredExams.forEach(exam => {
-      if (!examsByStudent[exam.studentId]) {
-        examsByStudent[exam.studentId] = [];
-      }
-      examsByStudent[exam.studentId].push(exam);
-    });
-
     return (
       <div className="space-y-4 md:space-y-6 animate-fadeIn px-2 md:px-0">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
@@ -1457,7 +1674,30 @@ export default function StudentManagementSystem() {
     );
   };
 
-  // Loading Animation
+  // Show authentication form if user is not logged in
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#F3E8D3] to-[#92B775]/20 flex items-center justify-center p-4">
+        <div className="w-full max-w-md animate-fadeIn">
+          {isAuthLoading ? (
+            <div className="text-center">
+              <div className="animate-bounce mb-4">
+                <div className="w-12 h-12 md:w-16 md:h-16 mx-auto bg-[#133215] rounded-full flex items-center justify-center">
+                  <Users className="w-6 h-6 md:w-8 md:h-8 text-[#F3E8D3]" />
+                </div>
+              </div>
+              <h2 className="text-xl md:text-2xl font-bold text-[#133215] mb-2">Track Class</h2>
+              <p className="text-gray-600 text-sm md:text-base">Checking authentication...</p>
+            </div>
+          ) : (
+            <AuthForm />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Loading Animation (only when user is logged in)
   if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-[#F3E8D3] to-[#92B775]/20 flex items-center justify-center">
@@ -1530,38 +1770,55 @@ export default function StudentManagementSystem() {
               <h1 className="text-[#F3E8D3] text-xl md:text-2xl font-bold">Track Class</h1>
             </div>
             
-            {/* Desktop Navigation */}
-            {!isMobile && (
-              <div className="flex space-x-1">
-                {navItems.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => setActiveTab(item.id)}
-                      className={`flex items-center gap-1 md:gap-2 px-3 md:px-4 py-1.5 md:py-2 rounded-lg transition transform hover:scale-105 active:scale-95 text-sm md:text-base ${
-                        activeTab === item.id
-                          ? 'bg-[#F3E8D3] text-[#133215]'
-                          : 'text-[#F3E8D3] hover:bg-[#133215]/80'
-                      }`}
-                    >
-                      <Icon className="w-4 h-4 md:w-5 md:h-5" />
-                      <span className="font-medium">{item.label}</span>
-                    </button>
-                  );
-                })}
+            <div className="flex items-center space-x-2 md:space-x-4">
+              {/* Desktop Navigation */}
+              {!isMobile && (
+                <div className="flex space-x-1">
+                  {navItems.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => setActiveTab(item.id)}
+                        className={`flex items-center gap-1 md:gap-2 px-3 md:px-4 py-1.5 md:py-2 rounded-lg transition transform hover:scale-105 active:scale-95 text-sm md:text-base ${
+                          activeTab === item.id
+                            ? 'bg-[#F3E8D3] text-[#133215]'
+                            : 'text-[#F3E8D3] hover:bg-[#133215]/80'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 md:w-5 md:h-5" />
+                        <span className="font-medium">{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              
+              {/* User Info and Logout */}
+              <div className="flex items-center gap-2">
+                <div className="hidden md:block text-right">
+                  <p className="text-[#F3E8D3] text-sm font-medium">{user.email}</p>
+                  <p className="text-[#F3E8D3]/70 text-xs">Welcome back!</p>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="text-[#F3E8D3] hover:bg-red-600 p-2 rounded-lg transition transform hover:scale-105 active:scale-95"
+                  title="Logout"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
               </div>
-            )}
-            
-            {/* Mobile Menu Button */}
-            {isMobile && (
-              <button
-                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                className="text-[#F3E8D3] hover:bg-[#133215]/80 p-2 rounded-lg transition"
-              >
-                <Menu className="w-6 h-6" />
-              </button>
-            )}
+              
+              {/* Mobile Menu Button */}
+              {isMobile && (
+                <button
+                  onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+                  className="text-[#F3E8D3] hover:bg-[#133215]/80 p-2 rounded-lg transition"
+                >
+                  <Menu className="w-6 h-6" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </nav>
@@ -1592,6 +1849,16 @@ export default function StudentManagementSystem() {
                   </button>
                 );
               })}
+              <div className="border-t border-[#F3E8D3]/20 px-4 py-4">
+                <p className="text-[#F3E8D3] text-sm mb-2">{user.email}</p>
+                <button
+                  onClick={handleLogout}
+                  className="w-full flex items-center justify-center gap-2 text-[#F3E8D3] hover:bg-red-600 px-4 py-3 rounded-lg transition"
+                >
+                  <LogOut className="w-5 h-5" />
+                  <span className="font-medium">Logout</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1771,7 +2038,7 @@ export default function StudentManagementSystem() {
                 <select
                   value={examFormData.studentId}
                   onChange={(e) => {
-                    const selectedStudent = students.find(s => s.id === parseInt(e.target.value));
+                    const selectedStudent = students.find(s => s.id === e.target.value);
                     setExamFormData({
                       ...examFormData,
                       studentId: e.target.value,
