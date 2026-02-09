@@ -26,6 +26,20 @@ export default function StudentManagementSystem() {
   const [showAttendanceModal, setShowAttendanceModal] = useState(false);
   const [todayDate] = useState(new Date().toISOString().split('T')[0]);
 
+  const [showRecordTestModal, setShowRecordTestModal] = useState(false);
+  const [tests, setTests] = useState([]);
+  const [testFormData, setTestFormData] = useState({
+    studentId: '',
+    studentName: '',
+    testName: '',
+    subject: '',
+    date: '',
+    score: '',
+    maxScore: '',
+    grade: '',
+    notes: ''
+  });
+
   const [exams, setExams] = useState([]);
   const [showRecordExamModal, setShowRecordExamModal] = useState(false);
   const [examFormData, setExamFormData] = useState({
@@ -53,6 +67,7 @@ export default function StudentManagementSystem() {
   const studentsCollection = collection(db, 'students');
   const attendanceCollection = collection(db, 'attendance');
   const examsCollection = collection(db, 'exams');
+  const testsCollection = collection(db, 'tests');
 
   // Check authentication state
   useEffect(() => {
@@ -63,7 +78,6 @@ export default function StudentManagementSystem() {
       // Only load app data if user is logged in
       if (currentUser) {
         loadInitialData(currentUser.uid);
-        setupRealtimeListeners(currentUser.uid);
       } else {
         setIsLoading(false);
       }
@@ -104,6 +118,15 @@ export default function StudentManagementSystem() {
       }));
       setExams(examsList);
 
+      // Load tests
+      const testsQuery = query(testsCollection, where('createdBy', '==', userId));
+      const testsSnapshot = await getDocs(testsQuery);
+      const testsList = testsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setTests(testsList);
+
       setIsLoading(false);
     } catch (error) {
       console.error('Error loading data from Firestore:', error);
@@ -113,7 +136,11 @@ export default function StudentManagementSystem() {
   };
 
   // Set up real-time listeners when user is logged in
-  const setupRealtimeListeners = (userId) => {
+  useEffect(() => {
+    if (!user) return;
+
+    const userId = user.uid;
+    
     // Students listener
     const studentsQuery = query(studentsCollection, where('createdBy', '==', userId));
     const unsubscribeStudents = onSnapshot(studentsQuery, (snapshot) => {
@@ -150,25 +177,23 @@ export default function StudentManagementSystem() {
       console.error('Error in exams listener:', error);
     });
 
+    // Tests listener
+    const testsQuery = query(testsCollection, where('createdBy', '==', userId));
+    const unsubscribeTests = onSnapshot(testsQuery, (snapshot) => {
+      const testsList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setTests(testsList);
+    }, (error) => {
+      console.error('Error in tests listener:', error);
+    });
+
     return () => {
       unsubscribeStudents();
       unsubscribeAttendance();
       unsubscribeExams();
-    };
-  };
-
-  // Clean up listeners when component unmounts
-  useEffect(() => {
-    let cleanupListeners;
-    
-    if (user) {
-      cleanupListeners = setupRealtimeListeners(user.uid);
-    }
-    
-    return () => {
-      if (cleanupListeners) {
-        cleanupListeners();
-      }
+      unsubscribeTests();
     };
   }, [user]);
 
@@ -199,6 +224,7 @@ export default function StudentManagementSystem() {
       setStudents([]);
       setAttendance([]);
       setExams([]);
+      setTests([]);
       setSearchQuery('');
       setActiveTab('home');
     } catch (error) {
@@ -283,6 +309,17 @@ export default function StudentManagementSystem() {
         );
         await Promise.all(deletePromises);
         
+        // Also delete associated tests
+        const testsQuery = query(testsCollection, 
+          where('studentId', '==', id),
+          where('createdBy', '==', user.uid)
+        );
+        const testsSnapshot = await getDocs(testsQuery);
+        const deleteTestPromises = testsSnapshot.docs.map(testDoc => 
+          deleteDoc(doc(db, 'tests', testDoc.id))
+        );
+        await Promise.all(deleteTestPromises);
+        
         // Also delete associated attendance records
         const attendanceQuery = query(attendanceCollection, 
           where('studentId', '==', id),
@@ -320,8 +357,20 @@ export default function StudentManagementSystem() {
     setShowEditModal(false);
     setShowAttendanceModal(false);
     setShowRecordExamModal(false);
+    setShowRecordTestModal(false);
     setEditingStudent(null);
     setFormData({ name: '', class: '', email: '', phone: '' });
+    setTestFormData({
+      studentId: '',
+      studentName: '',
+      testName: '',
+      subject: '',
+      date: '',
+      score: '',
+      maxScore: '',
+      grade: '',
+      notes: ''
+    });
     setExamFormData({
       studentId: '',
       studentName: '',
@@ -407,6 +456,24 @@ export default function StudentManagementSystem() {
     setShowRecordExamModal(true);
   };
 
+  // Open record test modal
+  const openRecordTestModal = (student = null) => {
+    if (student) {
+      setTestFormData({
+        ...testFormData,
+        studentId: student.id,
+        studentName: student.name,
+        date: todayDate
+      });
+    } else {
+      setTestFormData({
+        ...testFormData,
+        date: todayDate
+      });
+    }
+    setShowRecordTestModal(true);
+  };
+
   // Calculate grade based on score
   const calculateGrade = (score, maxScore) => {
     if (!score || !maxScore || maxScore === 0) return '';
@@ -417,6 +484,76 @@ export default function StudentManagementSystem() {
     if (percentage >= 70) return 'C';
     if (percentage >= 60) return 'D';
     return 'F';
+  };
+
+  // Handle record test to Firestore
+  const handleRecordTest = async () => {
+    if (testFormData.studentId && testFormData.testName && testFormData.subject && testFormData.score && testFormData.maxScore) {
+      try {
+        const studentId = testFormData.studentId;
+        const student = students.find(s => s.id === studentId);
+        
+        if (!student) {
+          alert('Student not found!');
+          return;
+        }
+
+        const grade = calculateGrade(testFormData.score, testFormData.maxScore);
+        const percentage = testFormData.maxScore ? Math.round((parseFloat(testFormData.score) / parseFloat(testFormData.maxScore)) * 100) : 0;
+
+        const newTest = {
+          studentId: studentId,
+          studentName: student.name,
+          testName: testFormData.testName,
+          subject: testFormData.subject,
+          date: testFormData.date,
+          score: parseFloat(testFormData.score),
+          maxScore: parseFloat(testFormData.maxScore),
+          grade,
+          notes: testFormData.notes,
+          percentage: percentage,
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        };
+        
+        await addDoc(testsCollection, newTest);
+        
+        setTestFormData({
+          studentId: '',
+          studentName: '',
+          testName: '',
+          subject: '',
+          date: '',
+          score: '',
+          maxScore: '',
+          grade: '',
+          notes: ''
+        });
+        setShowRecordTestModal(false);
+        
+        alert(`Test result recorded successfully for ${student.name}!`);
+      } catch (error) {
+        console.error('Error recording test:', error);
+        alert('Error recording test result. Please try again.');
+      }
+    } else {
+      alert('Please fill in all required fields!');
+    }
+  };
+
+  // Handle deleting a test from Firestore
+  const handleDeleteTest = async (id) => {
+    if (window.confirm('Are you sure you want to delete this test result?')) {
+      try {
+        const testRef = doc(db, 'tests', id);
+        await deleteDoc(testRef);
+        alert('Test result deleted successfully!');
+      } catch (error) {
+        console.error('Error deleting test:', error);
+        alert('Error deleting test result. Please try again.');
+      }
+    }
   };
 
   // Handle recording an exam to Firestore
@@ -494,13 +631,25 @@ export default function StudentManagementSystem() {
     return exams.filter(exam => exam.studentId === studentId);
   };
 
-  // Get average score for a student
-  const getStudentAverage = (studentId) => {
+  // Get tests for a specific student
+  const getStudentTests = (studentId) => {
+    return tests.filter(test => test.studentId === studentId);
+  };
+
+  // Get all assessments (tests + exams) for a student
+  const getStudentAssessments = (studentId) => {
     const studentExams = getStudentExams(studentId);
-    if (studentExams.length === 0) return 0;
+    const studentTests = getStudentTests(studentId);
+    return [...studentExams, ...studentTests];
+  };
+
+  // Get average score for a student (including both tests and exams)
+  const getStudentAverage = (studentId) => {
+    const assessments = getStudentAssessments(studentId);
+    if (assessments.length === 0) return 0;
     
-    const totalPercentage = studentExams.reduce((sum, exam) => sum + exam.percentage, 0);
-    return Math.round(totalPercentage / studentExams.length);
+    const totalPercentage = assessments.reduce((sum, assessment) => sum + (assessment.percentage || 0), 0);
+    return Math.round(totalPercentage / assessments.length);
   };
 
   // Get attendance summary for a student
@@ -828,9 +977,9 @@ export default function StudentManagementSystem() {
 
   // Render home dashboard
   const renderHome = () => {
-    const totalExams = exams.length;
-    const averageScoreAll = students.length > 0 && totalExams > 0
-      ? Math.round(exams.reduce((sum, exam) => sum + exam.percentage, 0) / totalExams)
+    const totalAssessments = exams.length + tests.length;
+    const averageScoreAll = students.length > 0 && totalAssessments > 0
+      ? Math.round(([...exams, ...tests].reduce((sum, assessment) => sum + (assessment.percentage || 0), 0)) / totalAssessments)
       : 0;
     const topStudents = [...students]
       .map(student => ({
@@ -867,8 +1016,9 @@ export default function StudentManagementSystem() {
           <div className="bg-[#F3E8D3] rounded-lg shadow-md p-4 md:p-6 border-l-4 border-[#92B775]/70 animate-slideInUp" style={{animationDelay: '0.3s'}}>
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-gray-600 text-sm">Exams Recorded</p>
-                <p className="text-2xl md:text-3xl font-bold text-[#133215]">{totalExams}</p>
+                <p className="text-gray-600 text-sm">Assessments</p>
+                <p className="text-2xl md:text-3xl font-bold text-[#133215]">{totalAssessments}</p>
+                <p className="text-xs text-gray-500 mt-1">Tests: {tests.length} | Exams: {exams.length}</p>
               </div>
               <FileText className="w-8 h-8 md:w-12 md:h-12 text-[#92B775]/70" />
             </div>
@@ -888,7 +1038,7 @@ export default function StudentManagementSystem() {
           <div className="bg-[#F3E8D3] rounded-lg shadow-md p-4 md:p-6 animate-slideInUp" style={{animationDelay: '0.5s'}}>
             <h3 className="text-lg md:text-xl font-semibold text-[#133215] mb-4">Top Performers</h3>
             {topStudents.filter(s => s.average > 0).length === 0 ? (
-              <p className="text-gray-500 text-center py-4">No exam results recorded yet</p>
+              <p className="text-gray-500 text-center py-4">No assessment results recorded yet</p>
             ) : (
               <div className="space-y-3 md:space-y-4">
                 {topStudents.map((student, index) => (
@@ -1090,17 +1240,42 @@ export default function StudentManagementSystem() {
       return true;
     });
 
+    // Filter tests based on selected student or search query
+    const filteredTests = tests.filter(test => {
+      const student = students.find(s => s.id === test.studentId);
+      if (!student) return false;
+      
+      // If search query exists, filter by student name
+      if (searchQuery) {
+        return student.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+               student.class.toLowerCase().includes(searchQuery.toLowerCase());
+      }
+      
+      return true;
+    });
+
     return (
       <div className="space-y-4 md:space-y-6 animate-fadeIn px-2 md:px-0">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <h2 className="text-2xl md:text-3xl font-bold text-[#133215]">Tests & Exams</h2>
-          <button 
-            onClick={() => openRecordExamModal()}
-            className="bg-[#133215] text-[#F3E8D3] px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-[#133215]/90 transition transform hover:scale-105 active:scale-95 w-full sm:w-auto justify-center"
-          >
-            <Plus className="w-5 h-5" />
-            Record Test/Exam
-          </button>
+
+          <div className="flex flex-col sm:flex-row gap-3 md:gap-4">
+            <button 
+              onClick={() => openRecordTestModal()}
+              className="bg-[#92B775] text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-[#92B775]/90 transition transform hover:scale-105 active:scale-95 w-full sm:w-auto justify-center"
+            >
+              <Plus className="w-5 h-5" />
+              Record Tests
+            </button>
+            
+            <button 
+              onClick={() => openRecordExamModal()}
+              className="bg-[#133215] text-[#F3E8D3] px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-[#133215]/90 transition transform hover:scale-105 active:scale-95 w-full sm:w-auto justify-center"
+            >
+              <Plus className="w-5 h-5" />
+              Record Exams
+            </button>
+          </div>
         </div>
 
         {/* Filter Options */}
@@ -1175,7 +1350,7 @@ export default function StudentManagementSystem() {
                   </tr>
                 </thead>
                 <tbody>
-                  {exams.map((exam, index) => {
+                  {filteredExams.map((exam, index) => {
                     const student = students.find(s => s.id === exam.studentId);
                     return (
                       <tr 
@@ -1227,7 +1402,94 @@ export default function StudentManagementSystem() {
           )}
         </div>
 
-        {/* Students with Exams Summary */}
+        {/* All Tests View */}
+        <div className="bg-[#F3E8D3] rounded-lg shadow-md overflow-hidden animate-slideInUp" style={{animationDelay: '0.3s'}}>
+          <div className="bg-[#92B775] text-white px-4 md:px-6 py-3 md:py-4">
+            <h3 className="text-lg md:text-xl font-semibold">All Test Results</h3>
+            <p className="text-xs md:text-sm opacity-90 mt-1">Total: {tests.length} records</p>
+          </div>
+          
+          {tests.length === 0 ? (
+            <div className="text-center py-8 md:py-12">
+              <FileText className="w-12 h-12 md:w-16 md:h-16 text-gray-300 mx-auto mb-4" />
+              <p className="text-gray-500 text-base md:text-lg">No test results recorded yet</p>
+              <p className="text-gray-400 text-sm mt-2">Record test results to see them here</p>
+              <button 
+                onClick={() => openRecordTestModal()}
+                className="mt-4 bg-[#92B775] text-white px-4 py-2 rounded-lg hover:bg-[#92B775]/90 transition"
+              >
+                Record First Test
+              </button>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px]">
+                <thead className="bg-[#92B775]/30">
+                  <tr>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Student</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Class</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Test</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Subject</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Date</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Score</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Grade</th>
+                    <th className="px-4 py-2 md:px-6 md:py-3 text-left text-gray-700 text-sm md:text-base">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTests.map((test, index) => {
+                    const student = students.find(s => s.id === test.studentId);
+                    return (
+                      <tr 
+                        key={test.id} 
+                        className={`${index % 2 === 0 ? 'bg-[#92B775]/10' : 'bg-white'} hover:bg-[#92B775]/20 transition animate-fadeIn`}
+                        style={{animationDelay: `${index * 0.05}s`}}
+                      >
+                        <td className="px-4 py-3 md:px-6 md:py-4 text-gray-900 text-sm md:text-base">{student?.name || test.studentName}</td>
+                        <td className="px-4 py-3 md:px-6 md:py-4 text-gray-700 text-sm md:text-base">{student?.class || 'N/A'}</td>
+                        <td className="px-4 py-3 md:px-6 md:py-4 text-gray-900 text-sm md:text-base">{test.testName}</td>
+                        <td className="px-4 py-3 md:px-6 md:py-4 text-gray-700 text-sm md:text-base">{test.subject}</td>
+                        <td className="px-4 py-3 md:px-6 md:py-4 text-gray-700 text-sm md:text-base">{test.date}</td>
+                        <td className="px-4 py-3 md:px-6 md:py-4">
+                          <div className="flex items-center gap-1 md:gap-2">
+                            <span className="font-bold text-[#133215] text-sm md:text-base">
+                              {test.score}/{test.maxScore}
+                            </span>
+                            <span className="text-xs md:text-sm text-gray-600">
+                              ({test.percentage}%)
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 md:px-6 md:py-4">
+                          <span className={`px-2 md:px-3 py-1 rounded-full text-xs md:text-sm font-medium transition ${
+                            test.grade === 'A' ? 'bg-green-100 text-green-800 hover:bg-green-200' :
+                            test.grade === 'B' ? 'bg-blue-100 text-blue-800 hover:bg-blue-200' :
+                            test.grade === 'C' ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200' :
+                            test.grade === 'D' ? 'bg-orange-100 text-orange-800 hover:bg-orange-200' :
+                            'bg-red-100 text-red-800 hover:bg-red-200'
+                          }`}>
+                            {test.grade}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 md:px-6 md:py-4">
+                          <button 
+                            onClick={() => handleDeleteTest(test.id)}
+                            className="text-red-600 hover:text-red-800 transition transform hover:scale-110 active:scale-95"
+                            title="Delete Test Result"
+                          >
+                            <Trash2 className="w-3 h-3 md:w-4 md:h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Students with Assessments Summary */}
         <div className="space-y-4 md:space-y-6">
           <h3 className="text-xl md:text-2xl font-bold text-[#133215] px-2 md:px-0">Students Performance Summary</h3>
           
@@ -1235,11 +1497,12 @@ export default function StudentManagementSystem() {
             <div className="bg-[#F3E8D3] rounded-lg shadow-md p-6 md:p-8 text-center animate-pulse">
               <Users className="w-12 h-12 md:w-16 md:h-16 text-gray-300 mx-auto mb-4" />
               <p className="text-gray-500 text-base md:text-lg">No students found</p>
-              <p className="text-gray-400 text-sm mt-2">Add students first to see their exam performance</p>
+              <p className="text-gray-400 text-sm mt-2">Add students first to see their performance</p>
             </div>
           ) : (
             filteredStudents.map((student, studentIndex) => {
               const studentExams = getStudentExams(student.id);
+              const studentTests = getStudentTests(student.id);
               const averageScore = getStudentAverage(student.id);
               
               return (
@@ -1257,100 +1520,171 @@ export default function StudentManagementSystem() {
                       </div>
                       <div className="flex flex-wrap gap-2 md:gap-3">
                         <button 
-                          onClick={() => openRecordExamModal(student)}
-                          className="bg-[#133215] text-[#F3E8D3] px-3 md:px-4 py-1 md:py-2 rounded-lg flex items-center gap-1 md:gap-2 hover:bg-[#133215]/90 transition transform hover:scale-105 active:scale-95 text-xs md:text-sm"
+                          onClick={() => openRecordTestModal(student)}
+                          className="bg-[#92B775] text-white px-3 md:px-4 py-1 md:py-2 rounded-lg flex items-center gap-1 md:gap-2 hover:bg-[#92B775]/90 transition transform hover:scale-105 active:scale-95 text-xs md:text-sm"
                         >
                           <Plus className="w-3 h-3 md:w-4 md:h-4" />
-                          Add Exam Result
+                          Add Test
+                        </button>
+                        <button 
+                          onClick={() => openRecordExamModal(student)}
+                          className="bg-[#133215] text-white px-3 md:px-4 py-1 md:py-2 rounded-lg flex items-center gap-1 md:gap-2 hover:bg-[#133215]/90 transition transform hover:scale-105 active:scale-95 text-xs md:text-sm"
+                        >
+                          <Plus className="w-3 h-3 md:w-4 md:h-4" />
+                          Add Exam
                         </button>
                         <div className="bg-white border border-[#92B775] rounded-lg px-2 md:px-4 py-1 md:py-2 transition hover:shadow-md">
                           <p className="text-xs text-gray-600">Average Score</p>
                           <p className="text-base md:text-lg font-bold text-[#133215]">{averageScore}%</p>
                         </div>
                         <div className="bg-white border border-[#92B775] rounded-lg px-2 md:px-4 py-1 md:py-2 transition hover:shadow-md">
-                          <p className="text-xs text-gray-600">Exams Taken</p>
-                          <p className="text-base md:text-lg font-bold text-[#133215]">{studentExams.length}</p>
+                          <p className="text-xs text-gray-600">Assessments</p>
+                          <p className="text-base md:text-lg font-bold text-[#133215]">{studentExams.length + studentTests.length}</p>
+                          <p className="text-xs text-gray-500">T: {studentTests.length} | E: {studentExams.length}</p>
                         </div>
                       </div>
                     </div>
                   </div>
 
-                  {/* Exam Results Table */}
+                  {/* Assessment Results */}
                   <div className="p-3 md:p-4">
-                    {studentExams.length === 0 ? (
+                    {(studentExams.length === 0 && studentTests.length === 0) ? (
                       <div className="text-center py-4 md:py-8">
                         <FileText className="w-8 h-8 md:w-12 md:h-12 text-gray-300 mx-auto mb-3 md:mb-4" />
-                        <p className="text-gray-500 text-sm md:text-base">No exam results recorded for {student.name}</p>
-                        <button 
-                          onClick={() => openRecordExamModal(student)}
-                          className="mt-3 md:mt-4 text-[#133215] hover:text-[#133215]/80 font-medium transition text-sm md:text-base"
-                        >
-                          + Record first exam result
-                        </button>
+                        <p className="text-gray-500 text-sm md:text-base">No assessment results recorded for {student.name}</p>
+                        <div className="flex flex-col sm:flex-row gap-2 mt-3 md:mt-4">
+                          <button 
+                            onClick={() => openRecordTestModal(student)}
+                            className="text-[#92B775] hover:text-[#92B775]/80 font-medium transition text-sm md:text-base"
+                          >
+                            + Record first test
+                          </button>
+                          <span className="hidden sm:block text-gray-300">|</span>
+                          <button 
+                            onClick={() => openRecordExamModal(student)}
+                            className="text-[#133215] hover:text-[#133215]/80 font-medium transition text-sm md:text-base"
+                          >
+                            + Record first exam
+                          </button>
+                        </div>
                       </div>
                     ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full min-w-[640px]">
-                          <thead className="bg-[#92B775]/30">
-                            <tr>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Exam Name</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Subject</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Date</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Score</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Percentage</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Grade</th>
-                              <th className="px-3 md:px-4 py-2 md:py-3 text-left text-gray-700 text-sm md:text-base">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {studentExams.map((exam, examIndex) => (
-                              <tr 
-                                key={exam.id} 
-                                className="border-b border-gray-100 hover:bg-[#92B775]/10 transition animate-fadeIn"
-                                style={{animationDelay: `${examIndex * 0.05}s`}}
-                              >
-                                <td className="px-3 md:px-4 py-2 md:py-3">
-                                  <div>
-                                    <p className="font-medium text-gray-900 text-sm md:text-base">{exam.examName}</p>
-                                    {exam.notes && (
-                                      <p className="text-xs text-gray-500 mt-1">{exam.notes}</p>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className="px-3 md:px-4 py-2 md:py-3 text-gray-700 text-sm md:text-base">{exam.subject}</td>
-                                <td className="px-3 md:px-4 py-2 md:py-3 text-gray-700 text-sm md:text-base">{exam.date}</td>
-                                <td className="px-3 md:px-4 py-2 md:py-3">
-                                  <span className="font-bold text-[#133215] text-sm md:text-base">
-                                    {exam.score}/{exam.maxScore}
-                                  </span>
-                                </td>
-                                <td className="px-3 md:px-4 py-2 md:py-3">
-                                  <span className="font-bold text-[#133215] text-sm md:text-base">{exam.percentage}%</span>
-                                </td>
-                                <td className="px-3 md:px-4 py-2 md:py-3">
-                                  <span className={`px-2 md:px-3 py-1 rounded-full text-xs md:text-sm font-medium transition ${
-                                    exam.grade === 'A' ? 'bg-green-100 text-green-800 hover:bg-green-200' :
-                                    exam.grade === 'B' ? 'bg-blue-100 text-blue-800 hover:bg-blue-200' :
-                                    exam.grade === 'C' ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200' :
-                                    exam.grade === 'D' ? 'bg-orange-100 text-orange-800 hover:bg-orange-200' :
-                                    'bg-red-100 text-red-800 hover:bg-red-200'
-                                  }`}>
-                                    {exam.grade}
-                                  </span>
-                                </td>
-                                <td className="px-3 md:px-4 py-2 md:py-3">
-                                  <button 
-                                    onClick={() => handleDeleteExam(exam.id)}
-                                    className="text-red-600 hover:text-red-800 transition transform hover:scale-110 active:scale-95"
-                                    title="Delete Exam Result"
-                                  >
-                                    <Trash2 className="w-3 h-3 md:w-4 md:h-4" />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className="space-y-4">
+                        {/* Tests Section */}
+                        {studentTests.length > 0 && (
+                          <div>
+                            <h5 className="text-md font-semibold text-[#92B775] mb-2">Tests</h5>
+                            <div className="overflow-x-auto">
+                              <table className="w-full min-w-[640px]">
+                                <thead className="bg-[#92B775]/20">
+                                  <tr>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Test Name</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Subject</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Date</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Score</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Grade</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {studentTests.map((test, testIndex) => (
+                                    <tr 
+                                      key={test.id} 
+                                      className="border-b border-gray-100 hover:bg-[#92B775]/10 transition"
+                                    >
+                                      <td className="px-3 md:px-4 py-2 text-gray-900 text-sm">{test.testName}</td>
+                                      <td className="px-3 md:px-4 py-2 text-gray-700 text-sm">{test.subject}</td>
+                                      <td className="px-3 md:px-4 py-2 text-gray-700 text-sm">{test.date}</td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <span className="font-bold text-[#92B775] text-sm">
+                                          {test.score}/{test.maxScore} ({test.percentage}%)
+                                        </span>
+                                      </td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                          test.grade === 'A' ? 'bg-green-100 text-green-800' :
+                                          test.grade === 'B' ? 'bg-blue-100 text-blue-800' :
+                                          test.grade === 'C' ? 'bg-yellow-100 text-yellow-800' :
+                                          test.grade === 'D' ? 'bg-orange-100 text-orange-800' :
+                                          'bg-red-100 text-red-800'
+                                        }`}>
+                                          {test.grade}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <button 
+                                          onClick={() => handleDeleteTest(test.id)}
+                                          className="text-red-600 hover:text-red-800 transition"
+                                          title="Delete Test Result"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Exams Section */}
+                        {studentExams.length > 0 && (
+                          <div>
+                            <h5 className="text-md font-semibold text-[#133215] mb-2">Exams</h5>
+                            <div className="overflow-x-auto">
+                              <table className="w-full min-w-[640px]">
+                                <thead className="bg-[#133215]/10">
+                                  <tr>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Exam Name</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Subject</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Date</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Score</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Grade</th>
+                                    <th className="px-3 md:px-4 py-2 text-left text-gray-700 text-sm">Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {studentExams.map((exam, examIndex) => (
+                                    <tr 
+                                      key={exam.id} 
+                                      className="border-b border-gray-100 hover:bg-[#133215]/5 transition"
+                                    >
+                                      <td className="px-3 md:px-4 py-2 text-gray-900 text-sm">{exam.examName}</td>
+                                      <td className="px-3 md:px-4 py-2 text-gray-700 text-sm">{exam.subject}</td>
+                                      <td className="px-3 md:px-4 py-2 text-gray-700 text-sm">{exam.date}</td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <span className="font-bold text-[#133215] text-sm">
+                                          {exam.score}/{exam.maxScore} ({exam.percentage}%)
+                                        </span>
+                                      </td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                          exam.grade === 'A' ? 'bg-green-100 text-green-800' :
+                                          exam.grade === 'B' ? 'bg-blue-100 text-blue-800' :
+                                          exam.grade === 'C' ? 'bg-yellow-100 text-yellow-800' :
+                                          exam.grade === 'D' ? 'bg-orange-100 text-orange-800' :
+                                          'bg-red-100 text-red-800'
+                                        }`}>
+                                          {exam.grade}
+                                        </span>
+                                      </td>
+                                      <td className="px-3 md:px-4 py-2">
+                                        <button 
+                                          onClick={() => handleDeleteExam(exam.id)}
+                                          className="text-red-600 hover:text-red-800 transition"
+                                          title="Delete Exam Result"
+                                        >
+                                          <Trash2 className="w-3 h-3" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1393,6 +1727,7 @@ export default function StudentManagementSystem() {
                 <option value="student">Student Performance Report</option>
                 <option value="attendance">Attendance Summary</option>
                 <option value="exams">Exam Results Analysis</option>
+                <option value="tests">Test Results Analysis</option>
                 <option value="class">Class Overview</option>
               </select>
             </div>
@@ -1444,6 +1779,7 @@ export default function StudentManagementSystem() {
                 const averageScore = getStudentAverage(student.id);
                 const attendanceSummary = getStudentAttendanceSummary(student.id);
                 const studentExams = getStudentExams(student.id);
+                const studentTests = getStudentTests(student.id);
                 
                 return (
                   <div 
@@ -1482,6 +1818,12 @@ export default function StudentManagementSystem() {
                           <p className="text-xl md:text-2xl font-bold text-[#133215]">{attendanceSummary.attendanceRate}%</p>
                           <p className="text-xs text-gray-600">Attendance</p>
                         </div>
+                      </div>
+                      
+                      <div className="text-center p-2 bg-[#F3E8D3] rounded mb-3 md:mb-4">
+                        <p className="text-sm text-gray-600">Assessments</p>
+                        <p className="text-lg font-bold text-[#133215]">{studentExams.length + studentTests.length}</p>
+                        <p className="text-xs text-gray-500">Tests: {studentTests.length} | Exams: {studentExams.length}</p>
                       </div>
                       
                       <div className="flex flex-col sm:flex-row gap-2">
@@ -1586,20 +1928,21 @@ export default function StudentManagementSystem() {
                 </div>
                 
                 <div className="stat-card">
-                  <h4 className="text-base md:text-lg font-semibold text-[#133215]">Exams Taken</h4>
-                  <p className="text-2xl md:text-3xl font-bold mt-2 text-[#133215]">{getStudentExams(selectedStudentForReport.id).length}</p>
+                  <h4 className="text-base md:text-lg font-semibold text-[#133215]">Assessments Taken</h4>
+                  <p className="text-2xl md:text-3xl font-bold mt-2 text-[#133215]">{getStudentAssessments(selectedStudentForReport.id).length}</p>
                   <p className="text-xs md:text-sm text-gray-600">Total Tests/Exams</p>
                 </div>
               </div>
               
               <div className="mt-4 md:mt-6">
-                <h3 className="text-lg md:text-xl font-semibold text-[#133215] mb-2 md:mb-3">Exam Results</h3>
-                {getStudentExams(selectedStudentForReport.id).length > 0 ? (
+                <h3 className="text-lg md:text-xl font-semibold text-[#133215] mb-2 md:mb-3">Assessment Results</h3>
+                {getStudentAssessments(selectedStudentForReport.id).length > 0 ? (
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[640px]">
                       <thead>
                         <tr>
-                          <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Exam Name</th>
+                          <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Type</th>
+                          <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Name</th>
                           <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Subject</th>
                           <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Date</th>
                           <th className="px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] text-sm md:text-base">Score</th>
@@ -1607,16 +1950,21 @@ export default function StudentManagementSystem() {
                         </tr>
                       </thead>
                       <tbody>
-                        {getStudentExams(selectedStudentForReport.id).map((exam, index) => (
-                          <tr key={exam.id} className={index % 2 === 0 ? 'bg-gray-50' : ''}>
-                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">{exam.examName}</td>
-                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">{exam.subject}</td>
-                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">{exam.date}</td>
+                        {getStudentAssessments(selectedStudentForReport.id).map((assessment, index) => (
+                          <tr key={assessment.id} className={index % 2 === 0 ? 'bg-gray-50' : ''}>
                             <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">
-                              {exam.score}/{exam.maxScore} ({exam.percentage}%)
+                              {assessment.testName ? 'Test' : 'Exam'}
                             </td>
-                            <td className={`px-3 md:px-4 py-2 border-b font-bold grade-${exam.grade} text-sm md:text-base`}>
-                              {exam.grade}
+                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">
+                              {assessment.testName || assessment.examName}
+                            </td>
+                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">{assessment.subject}</td>
+                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">{assessment.date}</td>
+                            <td className="px-3 md:px-4 py-2 border-b text-sm md:text-base">
+                              {assessment.score}/{assessment.maxScore} ({assessment.percentage}%)
+                            </td>
+                            <td className={`px-3 md:px-4 py-2 border-b font-bold grade-${assessment.grade} text-sm md:text-base`}>
+                              {assessment.grade}
                             </td>
                           </tr>
                         ))}
@@ -1624,7 +1972,7 @@ export default function StudentManagementSystem() {
                     </table>
                   </div>
                 ) : (
-                  <p className="text-gray-500 text-sm md:text-base">No exam results recorded for this student.</p>
+                  <p className="text-gray-500 text-sm md:text-base">No assessment results recorded for this student.</p>
                 )}
               </div>
               
@@ -1655,7 +2003,7 @@ export default function StudentManagementSystem() {
                 <div className="p-3 md:p-4 bg-gray-50 rounded">
                   <p className="text-gray-700 text-sm md:text-base">
                     {selectedStudentForReport.name} has an overall average score of <strong>{getStudentAverage(selectedStudentForReport.id)}%</strong> 
-                    across all exams. Attendance rate is <strong>{getStudentAttendanceSummary(selectedStudentForReport.id).attendanceRate}%</strong> 
+                    across all assessments. Attendance rate is <strong>{getStudentAttendanceSummary(selectedStudentForReport.id).attendanceRate}%</strong> 
                     with <strong>{getStudentAttendanceSummary(selectedStudentForReport.id).presentCount}</strong> days present out of 
                     <strong> {getStudentAttendanceSummary(selectedStudentForReport.id).totalCount}</strong> total recorded days.
                   </p>
@@ -2019,12 +2367,182 @@ export default function StudentManagementSystem() {
         </div>
       )}
 
+       {/* Record Test Modal */}
+      {showRecordTestModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 animate-fadeIn p-2 md:p-0">
+          <div className="bg-[#F3E8D3] rounded-lg p-4 md:p-8 max-w-md w-full mx-2 md:mx-4 max-h-[90vh] overflow-y-auto animate-slideInUp">
+            <div className="flex justify-between items-center mb-4 md:mb-6">
+              <h2 className="text-xl md:text-2xl font-bold text-[#133215]">Record Test Result</h2>
+              <button
+                onClick={closeModals}
+                className="text-gray-500 hover:text-gray-700 transition"
+              >
+                <X className="w-5 h-5 md:w-6 md:h-6" />
+              </button>
+            </div>
+            <div className="space-y-3 md:space-y-4">
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Student</label>
+                <select
+                  value={testFormData.studentId}
+                  onChange={(e) => {
+                    const selectedStudent = students.find(s => s.id === e.target.value);
+                    setTestFormData({
+                      ...testFormData,
+                      studentId: e.target.value,
+                      studentName: selectedStudent ? selectedStudent.name : ''
+                    });
+                  }}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  required
+                >
+                  <option value="">Select Student</option>
+                  {students.map(student => (
+                    <option key={student.id} value={student.id}>
+                      {student.name} - Class {student.class}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Test Name</label>
+                <input
+                  type="text"
+                  value={testFormData.testName}
+                  onChange={(e) => setTestFormData({...testFormData, testName: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  placeholder="e.g., Midterm Test, Quiz 1, etc."
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Subject</label>
+                <select
+                  value={testFormData.subject}
+                  onChange={(e) => setTestFormData({...testFormData, subject: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  required
+                >
+                  <option value="">Select Subject</option>
+                  <option value="Mathematics">Mathematics</option>
+                  <option value="Science">Science</option>
+                  <option value="English">English</option>
+                  <option value="History">History</option>
+                  <option value="Physics">Physics</option>
+                  <option value="Chemistry">Chemistry</option>
+                  <option value="Biology">Biology</option>
+                  <option value="Geography">Geography</option>
+                  <option value="Computer Science">Computer Science</option>
+                  <option value="Art">Art</option>
+                  <option value="Music">Music</option>
+                  <option value="Physical Education">Physical Education</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Date</label>
+                <input
+                  type="date"
+                  value={testFormData.date}
+                  onChange={(e) => setTestFormData({...testFormData, date: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+                <div>
+                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Maximum Score</label>
+                  <input
+                    type="number"
+                    value={testFormData.maxScore}
+                    onChange={(e) => {
+                      const maxScore = e.target.value;
+                      setTestFormData({...testFormData, maxScore});
+                      if (testFormData.score) {
+                        const grade = calculateGrade(testFormData.score, maxScore);
+                        setTestFormData(prev => ({...prev, grade}));
+                      }
+                    }}
+                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                    placeholder="e.g., 100"
+                    required
+                    min="0"
+                    step="0.1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Score Obtained</label>
+                  <input
+                    type="number"
+                    value={testFormData.score}
+                    onChange={(e) => {
+                      const score = e.target.value;
+                      setTestFormData({...testFormData, score});
+                      if (testFormData.maxScore) {
+                        const grade = calculateGrade(score, testFormData.maxScore);
+                        setTestFormData(prev => ({...prev, grade}));
+                      }
+                    }}
+                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                    placeholder="e.g., 85"
+                    required
+                    min="0"
+                    max={testFormData.maxScore || 100}
+                    step="0.1"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Grade</label>
+                <input
+                  type="text"
+                  value={testFormData.grade}
+                  readOnly
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg bg-gray-50 text-sm md:text-base"
+                  placeholder="Auto-calculated"
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Notes (Optional)</label>
+                <textarea
+                  value={testFormData.notes}
+                  onChange={(e) => setTestFormData({...testFormData, notes: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  placeholder="Add any additional notes or comments"
+                  rows="3"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 md:gap-3 mt-4 md:mt-6">
+              <button
+                onClick={closeModals}
+                className="flex-1 px-3 md:px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition transform hover:scale-105 active:scale-95 text-sm md:text-base"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRecordTest}
+                className="flex-1 px-3 md:px-4 py-2 bg-[#92B775] text-white rounded-lg hover:bg-[#92B775]/90 transition transform hover:scale-105 active:scale-95 text-sm md:text-base"
+              >
+                Record Test Result
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Record Exam Modal */}
       {showRecordExamModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 animate-fadeIn p-2 md:p-0">
           <div className="bg-[#F3E8D3] rounded-lg p-4 md:p-8 max-w-md w-full mx-2 md:mx-4 max-h-[90vh] overflow-y-auto animate-slideInUp">
             <div className="flex justify-between items-center mb-4 md:mb-6">
-              <h2 className="text-xl md:text-2xl font-bold text-[#133215]">Record Test/Exam Result</h2>
+              <h2 className="text-xl md:text-2xl font-bold text-[#133215]">Record Exam Result</h2>
               <button
                 onClick={closeModals}
                 className="text-gray-500 hover:text-gray-700 transition"
@@ -2057,41 +2575,40 @@ export default function StudentManagementSystem() {
                 </select>
               </div>
               
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
-                <div>
-                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Exam Name</label>
-                  <input
-                    type="text"
-                    value={examFormData.examName}
-                    onChange={(e) => setExamFormData({...examFormData, examName: e.target.value})}
-                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
-                    placeholder="e.g., Mid-Term, Final"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Subject</label>
-                  <select
-                    value={examFormData.subject}
-                    onChange={(e) => setExamFormData({...examFormData, subject: e.target.value})}
-                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
-                    required
-                  >
-                    <option value="">Select Subject</option>
-                    <option value="Mathematics">Mathematics</option>
-                    <option value="Science">Science</option>
-                    <option value="English">English</option>
-                    <option value="History">History</option>
-                    <option value="Physics">Physics</option>
-                    <option value="Chemistry">Chemistry</option>
-                    <option value="Biology">Biology</option>
-                    <option value="Geography">Geography</option>
-                    <option value="Computer Science">Computer Science</option>
-                    <option value="Art">Art</option>
-                    <option value="Music">Music</option>
-                    <option value="Physical Education">Physical Education</option>
-                  </select>
-                </div>
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Exam Name</label>
+                <input
+                  type="text"
+                  value={examFormData.examName}
+                  onChange={(e) => setExamFormData({...examFormData, examName: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  placeholder="e.g., Final Exam, Midterm, etc."
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Subject</label>
+                <select
+                  value={examFormData.subject}
+                  onChange={(e) => setExamFormData({...examFormData, subject: e.target.value})}
+                  className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                  required
+                >
+                  <option value="">Select Subject</option>
+                  <option value="Mathematics">Mathematics</option>
+                  <option value="Science">Science</option>
+                  <option value="English">English</option>
+                  <option value="History">History</option>
+                  <option value="Physics">Physics</option>
+                  <option value="Chemistry">Chemistry</option>
+                  <option value="Biology">Biology</option>
+                  <option value="Geography">Geography</option>
+                  <option value="Computer Science">Computer Science</option>
+                  <option value="Art">Art</option>
+                  <option value="Music">Music</option>
+                  <option value="Physical Education">Physical Education</option>
+                </select>
               </div>
 
               <div>
@@ -2106,24 +2623,6 @@ export default function StudentManagementSystem() {
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
-                <div>
-                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Score Obtained</label>
-                  <input
-                    type="number"
-                    value={examFormData.score}
-                    onChange={(e) => {
-                      const score = e.target.value;
-                      setExamFormData({...examFormData, score});
-                      if (examFormData.maxScore) {
-                        const grade = calculateGrade(score, examFormData.maxScore);
-                        setExamFormData(prev => ({...prev, grade}));
-                      }
-                    }}
-                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
-                    placeholder="e.g., 85"
-                    required
-                  />
-                </div>
                 <div>
                   <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Maximum Score</label>
                   <input
@@ -2140,6 +2639,30 @@ export default function StudentManagementSystem() {
                     className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
                     placeholder="e.g., 100"
                     required
+                    min="0"
+                    step="0.1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 mb-1 md:mb-2 text-sm md:text-base">Score Obtained</label>
+                  <input
+                    type="number"
+                    value={examFormData.score}
+                    onChange={(e) => {
+                      const score = e.target.value;
+                      setExamFormData({...examFormData, score});
+                      if (examFormData.maxScore) {
+                        const grade = calculateGrade(score, examFormData.maxScore);
+                        setExamFormData(prev => ({...prev, grade}));
+                      }
+                    }}
+                    className="w-full px-3 md:px-4 py-2 border border-[#92B775] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#133215] bg-white transition text-sm md:text-base"
+                    placeholder="e.g., 85"
+                    required
+                    min="0"
+                    max={examFormData.maxScore || 100}
+                    step="0.1"
                   />
                 </div>
               </div>
@@ -2177,7 +2700,7 @@ export default function StudentManagementSystem() {
                 onClick={handleRecordExam}
                 className="flex-1 px-3 md:px-4 py-2 bg-[#133215] text-[#F3E8D3] rounded-lg hover:bg-[#133215]/90 transition transform hover:scale-105 active:scale-95 text-sm md:text-base"
               >
-                Record Result
+                Record Exam Result
               </button>
             </div>
           </div>
